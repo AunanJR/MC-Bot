@@ -1,0 +1,94 @@
+# Blueprint stack: API, worker, Postgres, Redis and an offline-mode test server.
+# Postgres and Redis sit on the internal `backend` network only and publish no ports.
+name: blueprint
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://blueprint:${POSTGRES_PASSWORD:-blueprint}@postgres:5432/blueprint
+  REDIS_URL: redis://redis:6379
+  BOT_USERNAME: ${BOT_USERNAME:-Blueprint}
+  MC_VERSION: ${MC_VERSION:-26.1}
+  OP_COMMANDS_PER_SECOND: ${OP_COMMANDS_PER_SECOND:-20}
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+  API_TOKEN: ${API_TOKEN:-}
+
+services:
+  api:
+    build: .
+    image: blueprint-app
+    command: ["node", "dist/api/main.js"]
+    environment:
+      <<: *app-env
+      PORT: 3000
+    ports:
+      - "${API_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [backend, default]
+    restart: unless-stopped
+
+  worker:
+    image: blueprint-app
+    command: ["node", "dist/worker/main.js"]
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [backend, default]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: blueprint
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-blueprint}
+      POSTGRES_DB: blueprint
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blueprint -d blueprint"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  # Offline-mode vanilla 26.1.1 test server; the bot account (BOT_USERNAME) is opped.
+  mc:
+    build: docker/mc
+    image: blueprint-test-mc
+    environment:
+      OPS: ${BOT_USERNAME:-Blueprint}
+    ports:
+      - "${MC_PORT:-25565}:25565"
+    volumes:
+      - mcdata:/etc/minecraft
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true
+
+volumes:
+  pgdata:
+  redisdata:
+  mcdata:
