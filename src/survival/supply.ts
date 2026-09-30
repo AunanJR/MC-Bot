@@ -28,10 +28,18 @@ export interface RefillResult {
  * build order, until `maxSlots` inventory slots are used.
  */
 export async function refillFromChest(bot: Bot, chestPos: Vec3Like, wanted: [string, number][], maxSlots: number): Promise<RefillResult> {
-  await bot.pathfinder.goto(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
+  const where = `${chestPos.x},${chestPos.y},${chestPos.z}`;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await bot.pathfinder.goto(new goals.GoalNear(chestPos.x, chestPos.y, chestPos.z, 3));
+      break;
+    } catch (err) {
+      if (attempt >= 2) throw new Error(`cannot reach the supply chest at ${where}: ${(err as Error).message}`);
+    }
+  }
   const block = bot.blockAt(vec(chestPos));
   if (!block || !/chest|barrel|shulker_box/.test(block.name)) {
-    throw new Error(`no chest at ${chestPos.x},${chestPos.y},${chestPos.z} (found ${block?.name ?? 'unloaded chunk'})`);
+    throw new Error(`no chest at ${where} (found ${block?.name ?? 'unloaded chunk'})`);
   }
   const window = await bot.openContainer(block);
   const withdrawn: Record<string, number> = {};
