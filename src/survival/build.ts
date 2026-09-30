@@ -7,7 +7,7 @@ import { noControl, type BuildControl, type ProgressListener } from '../builder/
 import { sleep } from '../builder/rate.js';
 import { parseState, shortName, StateCanonicalizer } from '../schematic/blockstate.js';
 import { isGravityBlock } from '../schematic/blockinfo.js';
-import type { Placement } from '../schematic/placement.js';
+import { posKey, type Placement } from '../schematic/placement.js';
 import type { Vec3Like } from '../schematic/rotate.js';
 import { verifyAndFix, type Fixer, type FullReport } from '../verify/fix.js';
 import { itemForState } from './items.js';
@@ -31,6 +31,10 @@ export interface SurvivalOptions {
   placeTimeoutMs: number;
   /** Attempts per block before giving up on it (the verify pass reports it). */
   maxAttempts: number;
+  /** Item the bot towers and bridges with when a block is out of reach; removed after the build. Null disables scaffolding. */
+  scaffoldItem: string | null;
+  /** How many scaffold items to carry when the chest has them. */
+  scaffoldCarry: number;
 }
 
 export const defaultSurvivalOptions: SurvivalOptions = {
@@ -41,6 +45,8 @@ export const defaultSurvivalOptions: SurvivalOptions = {
   settleMs: 1000,
   placeTimeoutMs: 2000,
   maxAttempts: 4,
+  scaffoldItem: 'minecraft:dirt',
+  scaffoldCarry: 64,
 };
 
 export interface SurvivalInput {
@@ -101,6 +107,11 @@ export class SurvivalBuilder {
   private readonly control: BuildControl;
   private readonly log: (msg: string) => void;
   private placed = 0;
+  private readonly movements: InstanceType<typeof Movements>;
+  private scaffolding = false;
+  /** Positions where the bot put scaffold blocks. */
+  readonly scaffold = new Map<string, Vec3Like>();
+  private readonly expectedAt = new Map<string, string>();
 
   constructor(
     private readonly bot: Bot,
@@ -122,6 +133,48 @@ export class SurvivalBuilder {
     movements.maxDropDown = 3;
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.thinkTimeout = 10_000;
+    this.movements = movements;
+    for (const p of input.placements) this.expectedAt.set(posKey(p), p.state);
+    const scaffoldName = this.opts.scaffoldItem ? shortName(this.opts.scaffoldItem) : null;
+    bot.on('blockUpdate', (oldBlock, newBlock) => {
+      if (!this.scaffolding || !scaffoldName || !newBlock || newBlock.name !== scaffoldName) return;
+      if (oldBlock && oldBlock.name === scaffoldName) return;
+      const p = newBlock.position;
+      this.scaffold.set(posKey(p), { x: p.x, y: p.y, z: p.z });
+    });
+  }
+
+  /** Lets the pathfinder tower and bridge with the scaffold item (only while retrying an unreachable block). */
+  private setScaffolding(on: boolean): boolean {
+    const name = this.opts.scaffoldItem ? shortName(this.opts.scaffoldItem) : null;
+    const id = name ? this.bot.registry.itemsByName[name]?.id : undefined;
+    if (on && (id === undefined || countInInventory(this.bot, this.opts.scaffoldItem!) === 0)) return false;
+    this.scaffolding = on;
+    this.movements.scafoldingBlocks = on ? [id!] : [];
+    this.movements.allow1by1towers = on;
+    this.bot.pathfinder.setMovements(this.movements);
+    return true;
+  }
+
+  /** Digs out every scaffold block the bot placed, top-down, leaving what the schematic wants. */
+  async removeScaffolding(): Promise<number> {
+    const name = this.opts.scaffoldItem ? shortName(this.opts.scaffoldItem) : null;
+    if (!name || this.scaffold.size === 0) return 0;
+    const cells = [...this.scaffold.values()].sort((a, b) => b.y - a.y);
+    let removed = 0;
+    for (const c of cells) {
+      await this.control.checkpoint();
+      const expected = this.expectedAt.get(posKey(c));
+      if (expected && shortName(parseState(expected).name) === name) continue;
+      const block = this.bot.blockAt(vec(c));
+      if (!block || block.name !== name) continue;
+      if (!(await this.walkWithinReach([c], [], false))) continue;
+      await this.bot.dig(this.bot.blockAt(vec(c))!, true);
+      removed++;
+    }
+    this.scaffold.clear();
+    this.log(`removed ${removed} scaffold blocks`);
+    return removed;
   }
 
   /** Mover for the verify pass: walks toward unloaded areas. */
@@ -148,6 +201,11 @@ export class SurvivalBuilder {
     return [...out.entries()];
   }
 
+  /** Scaffold items to take along; never something the bot waits for. */
+  private scaffoldWant(): [string, number][] {
+    return this.opts.scaffoldItem ? [[this.opts.scaffoldItem, this.opts.scaffoldCarry]] : [];
+  }
+
   private progress(stage: 'building' | 'waiting_for_items', total: number, missing?: Record<string, number>) {
     this.input.onProgress?.({ stage, done: this.placed, total, cursor: this.placed, ...(missing ? { missing } : {}) });
   }
@@ -164,7 +222,7 @@ export class SurvivalBuilder {
       const wanted = this.needs(remaining);
       // Always ask for the blocked item first.
       wanted.sort((a, b) => (a[0] === item ? -1 : b[0] === item ? 1 : 0));
-      const result = await refillFromChest(this.bot, this.input.chestPos, wanted, this.opts.carrySlots);
+      const result = await refillFromChest(this.bot, this.input.chestPos, [...wanted, ...this.scaffoldWant()], this.opts.carrySlots);
       const got = Object.entries(result.withdrawn).map(([k, v]) => `${v} ${shortName(k)}`).join(', ');
       if (got) this.log(`refilled from chest: ${got}`);
       if (countInInventory(this.bot, item) > 0) {
@@ -200,16 +258,33 @@ export class SurvivalBuilder {
     return out;
   }
 
-  private async walkWithinReach(refs: Vec3Like[], keepFree: Vec3Like[]): Promise<boolean> {
+  private async walkWithinReach(refs: Vec3Like[], keepFree: Vec3Like[], allowScaffold = true): Promise<boolean> {
     const goal = new GoalReach(refs, keepFree, this.opts.reach - 0.3);
-    if (goal.isEnd(this.bot.entity.position.floored()) && !keepFree.some((c) => botOccupies(this.bot, c))) return true;
+    const reached = () => goal.isEnd(this.bot.entity.position.floored()) && !keepFree.some((c) => botOccupies(this.bot, c));
+    if (reached()) return true;
+    let error = '';
     try {
       await this.bot.pathfinder.goto(goal);
     } catch (err) {
-      this.log(`no path near ${JSON.stringify(refs[0])}: ${(err as Error).message}`);
+      error = (err as Error).message;
+    }
+    // goto can also end on a partial path, so check where the bot actually is.
+    if (reached()) return true;
+    if (!allowScaffold || !this.setScaffolding(true)) {
+      this.log(`cannot get within reach of ${JSON.stringify(refs[0])}${error ? `: ${error}` : ''}`);
       return false;
     }
-    return !keepFree.some((c) => botOccupies(this.bot, c));
+    try {
+      // Out of reach on foot: tower or bridge there with scaffold blocks.
+      await this.bot.pathfinder.goto(goal);
+    } catch (err) {
+      error = (err as Error).message;
+    } finally {
+      this.setScaffolding(false);
+    }
+    if (reached()) return true;
+    this.log(`cannot get within reach of ${JSON.stringify(refs[0])}, even with scaffolding${error ? `: ${error}` : ''}`);
+    return false;
   }
 
   /** Places one block. Returns what happened; the caller decides about retries. */
@@ -293,6 +368,7 @@ export class SurvivalBuilder {
         queue.sort((a, b) => pos.distanceSquared(vec(a.p).offset(0.5, 0.5, 0.5)) - pos.distanceSquared(vec(b.p).offset(0.5, 0.5, 0.5)));
         let progressed = false;
         const next: Entry[] = [];
+        const reasons = new Map<string, number>();
         for (let i = 0; i < queue.length; i++) {
           const entry = queue[i];
           if (progressed) {
@@ -306,6 +382,7 @@ export class SurvivalBuilder {
             progressed = true;
             continue;
           }
+          reasons.set(result, (reasons.get(result) ?? 0) + 1);
           entry.attempts += result === 'no_reference' ? 0 : 1;
           if (entry.attempts >= this.opts.maxAttempts) {
             this.log(`giving up on ${entry.p.state} at ${entry.p.x},${entry.p.y},${entry.p.z}: ${result}`);
@@ -317,6 +394,7 @@ export class SurvivalBuilder {
         queue = next;
         if (!progressed) {
           // Nothing in this group can go in right now; retry these after the next group.
+          if (queue.length) this.log(`${groups[gi].label}: deferring ${queue.length} blocks (${[...reasons].map(([k, v]) => `${v} ${k}`).join(', ')})`);
           deferred = queue;
           break;
         }
@@ -333,7 +411,7 @@ export class SurvivalBuilder {
     const reachAndDig = async (pos: Vec3Like) => {
       const block = this.bot.blockAt(vec(pos));
       if (!block || isReplaceable(block.name)) return;
-      if (!(await this.walkWithinReach([pos], []))) return;
+      if (!(await this.walkWithinReach([pos], [], false))) return;
       await this.bot.dig(this.bot.blockAt(vec(pos))!, true);
     };
     return {
@@ -375,6 +453,7 @@ export async function buildSurvival(bot: Bot, input: SurvivalInput, options: Par
     log(`note: bot is in ${bot.game.gameMode} mode; survival placement still uses the inventory`);
   }
   const { unplaced } = await builder.build();
+  await builder.removeScaffolding();
   let report: FullReport | null = null;
   if (builder.opts.fixPasses > 0) {
     report = await verifyAndFix({
@@ -391,6 +470,21 @@ export async function buildSurvival(bot: Bot, input: SurvivalInput, options: Par
       onProgress: input.onProgress,
       log,
     });
+    if ((await builder.removeScaffolding()) > 0) {
+      report = await verifyAndFix({
+        bot,
+        placements: input.placements,
+        bounds: input.bounds,
+        canon: new StateCanonicalizer(bot.version),
+        mover: builder.mover,
+        fixer: builder.fixer(),
+        passes: 1,
+        settleMs: builder.opts.settleMs,
+        checkAir: false,
+        control: input.control,
+        log,
+      });
+    }
   }
   return { unplaced: unplaced.length, report };
 }
