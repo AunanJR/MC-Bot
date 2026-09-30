@@ -1,13 +1,13 @@
 import type { Bot } from 'mineflayer';
 import { commandWithFeedback, hasOperator } from '../bot/connect.js';
-import { TeleportMover } from '../bot/mover.js';
+import { TeleportMover, type Mover } from '../bot/mover.js';
 import { StateCanonicalizer } from '../schematic/blockstate.js';
 import type { Placement } from '../schematic/placement.js';
 import type { Vec3Like } from '../schematic/rotate.js';
-import { summarize, verifyPlacements, type VerifyReport } from '../verify/verify.js';
+import { verifyAndFix, type Fixer, type FullReport } from '../verify/fix.js';
 import { noControl, type BuildControl, type ProgressListener } from './control.js';
 import { planOpCommands, renderCommand, splitBox, type OpCommand, type PlacementFlag } from './plan.js';
-import { RateLimiter, sleep } from './rate.js';
+import { RateLimiter } from './rate.js';
 
 export interface OpBuildOptions {
   /** Commands sent per second. Each /fill counts as one. */
@@ -19,7 +19,7 @@ export interface OpBuildOptions {
   maxFillExtent: number;
   /** Fill the build's bounding box with air first. */
   clearArea: boolean;
-  /** Verify-and-fix passes after the build (0 disables verification). */
+  /** Verify passes after the build, with fixes between them (0 disables verification). */
   fixPasses: number;
   /** Wait for block updates to reach the client before verifying. */
   settleMs: number;
@@ -48,7 +48,7 @@ export interface OpBuildInput {
 
 export interface OpBuildResult {
   commandsSent: number;
-  report: VerifyReport | null;
+  report: FullReport | null;
 }
 
 function boxCenter(cmd: { from: Vec3Like; to: Vec3Like }): Vec3Like {
@@ -94,23 +94,38 @@ export async function buildOp(bot: Bot, input: OpBuildInput, options: Partial<Op
     input.onProgress?.({ stage: i < clearCommands.length ? 'clearing' : 'building', done: placed, total: totalBlocks, cursor: i + 1 });
   }
 
-  let report: VerifyReport | null = null;
-  for (let pass = 0; pass < opts.fixPasses; pass++) {
-    await sleep(opts.settleMs);
-    report = await verifyPlacements(bot, input.placements, canon, mover, { control, onProgress: input.onProgress });
-    log(`verify pass ${pass + 1}: ${summarize(report)}`);
-    if (report.diffs.length === 0) break;
-    if (pass === opts.fixPasses - 1) break;
-    let fixed = 0;
-    for (const diff of report.diffs) {
-      await control.checkpoint();
-      await mover.ensureLoaded(diff);
-      await limiter.acquire();
-      bot.chat(renderCommand({ from: diff, to: diff, state: diff.expected, count: 1 }, opts.placementFlag));
-      input.onProgress?.({ stage: 'fixing', done: ++fixed, total: report.diffs.length });
-    }
+  let report: FullReport | null = null;
+  if (opts.fixPasses > 0) {
+    const fixer = createOpFixer(bot, mover, limiter, opts.placementFlag);
+    report = await verifyAndFix({
+      bot,
+      placements: input.placements,
+      bounds: input.bounds,
+      canon,
+      mover,
+      fixer,
+      passes: opts.fixPasses,
+      settleMs: opts.settleMs,
+      checkAir: opts.clearArea,
+      control,
+      onProgress: input.onProgress,
+      log,
+    });
   }
   return { commandsSent: all.length, report };
+}
+
+/** Op-mode repairs: one /setblock per diff or obstruction. */
+export function createOpFixer(bot: Bot, mover: Mover, limiter: RateLimiter, flag: PlacementFlag): Fixer {
+  const setblock = async (pos: Vec3Like, state: string) => {
+    await mover.ensureLoaded(pos);
+    await limiter.acquire();
+    bot.chat(renderCommand({ from: pos, to: pos, state, count: 1 }, flag));
+  };
+  return {
+    fixDiff: (d) => setblock(d, d.expected),
+    clearObstruction: (o) => setblock(o, 'minecraft:air'),
+  };
 }
 
 /** Splits a box so neither horizontal side exceeds `extent`. */
