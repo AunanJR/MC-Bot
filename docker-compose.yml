@@ -9,6 +9,8 @@ x-app-env: &app-env
   MC_VERSION: ${MC_VERSION:-26.1}
   OP_COMMANDS_PER_SECOND: ${OP_COMMANDS_PER_SECOND:-20}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+  RECONNECT_ATTEMPTS: ${RECONNECT_ATTEMPTS:-10}
+  MAX_SCHEMATIC_BYTES: ${MAX_SCHEMATIC_BYTES:-20971520}
   API_TOKEN: ${API_TOKEN:-}
 
 services:
@@ -30,6 +32,7 @@ services:
     restart: unless-stopped
 
   worker:
+    build: .
     image: blueprint-app
     command: ["node", "dist/worker/main.js"]
     environment: *app-env
