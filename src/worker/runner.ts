@@ -11,6 +11,7 @@ import { loadSchematic } from '../schematic/load.js';
 import { buildBounds, toPlacements } from '../schematic/placement.js';
 import type { Rotation } from '../schematic/rotate.js';
 import { controlChannel, eventsChannel, type ControlMessage, type SessionEvent } from '../sessions/bus.js';
+import { buildSurvival, type SurvivalOptions } from '../survival/build.js';
 import type { FullReport } from '../verify/fix.js';
 
 export class DisconnectedError extends Error {
@@ -30,6 +31,7 @@ export interface RunnerDeps {
   /** Delay before reconnect attempt n (1-based). */
   reconnectDelayMs?: (attempt: number) => number;
   opDefaults?: Partial<OpBuildOptions>;
+  survivalDefaults?: Partial<SurvivalOptions>;
   log?: (msg: string) => void;
 }
 
@@ -112,8 +114,17 @@ export async function runSession(sessionId: string, deps: RunnerDeps): Promise<S
   let lastStage: string | null = session.stage;
   let lastWrite = 0;
   let lastPublish = 0;
+  let waiting = false;
   const onProgress = (e: ProgressEvent) => {
     if (e.cursor !== undefined) cursor = e.cursor;
+    // Survival builds report missing items; the session shows it until the chest is restocked.
+    if (e.stage === 'waiting_for_items' && !waiting) {
+      waiting = true;
+      if (!local.isPaused && !local.isCancelled) void setStatus('waiting_for_items', { missing: e.missing ?? null }).catch(() => {});
+    } else if (e.stage !== 'waiting_for_items' && waiting) {
+      waiting = false;
+      if (!local.isPaused && !local.isCancelled) void setStatus('running', { missing: null }).catch(() => {});
+    }
     const now = Date.now();
     const stageChanged = e.stage !== lastStage;
     lastStage = e.stage;
@@ -162,7 +173,13 @@ export async function runSession(sessionId: string, deps: RunnerDeps): Promise<S
           );
           report = result.report;
         } else {
-          throw new Error('survival mode is not implemented yet');
+          if (!session.chestPos) throw new Error('survival mode needs chestPos');
+          const result = await buildSurvival(
+            liveBot,
+            { placements, bounds, chestPos: session.chestPos, control, onProgress, log },
+            { ...deps.survivalDefaults, ...(session.options as Partial<SurvivalOptions>) },
+          );
+          report = result.report;
         }
         if (control.disconnectReason) throw new DisconnectedError(control.disconnectReason);
         const summary = reportSummary(report);

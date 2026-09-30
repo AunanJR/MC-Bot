@@ -37,6 +37,17 @@ const opOptions = z
   .partial()
   .strict();
 
+const survivalOptions = z
+  .object({
+    reach: z.number().min(1).max(6),
+    carrySlots: z.number().int().min(1).max(36),
+    waitPollMs: z.number().int().min(500).max(600_000),
+    fixPasses: z.number().int().min(0).max(10),
+    maxAttempts: z.number().int().min(1).max(20),
+  })
+  .partial()
+  .strict();
+
 const createSessionBody = z
   .object({
     server: z.object({
@@ -56,10 +67,8 @@ const createSessionBody = z
     if (body.mode === 'survival' && !body.chestPos) {
       ctx.addIssue({ code: 'custom', path: ['chestPos'], message: 'chestPos is required in survival mode' });
     }
-    if (body.mode === 'op') {
-      const parsed = opOptions.safeParse(body.options);
-      if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ ...issue, path: ['options', ...issue.path] } as never);
-    }
+    const parsed = (body.mode === 'op' ? opOptions : survivalOptions).safeParse(body.options);
+    if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ ...issue, path: ['options', ...issue.path] } as never);
   });
 
 export function presentSchematic(row: SchematicRow, version: string) {
