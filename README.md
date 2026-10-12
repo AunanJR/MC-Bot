@@ -16,6 +16,11 @@ schematic, reports the differences, fixes them (op: `/setblock`; survival: dig a
 You control everything through an HTTP API. Build progress is stored in Postgres and streamed over SSE.
 If the bot is disconnected, the build resumes where it stopped.
 
+## Website
+
+`web/` holds Blueprint Builds, a static website with interactive 3D, layer-by-layer guides for the builds,
+material lists and `.schem` downloads that this API accepts. See [web/README.md](web/README.md).
+
 ## Architecture
 
 | Service    | What it does                                                                    | Network            |

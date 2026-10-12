@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blueprint Builds</title>
+  <meta name="description" content="Interactive 3D guides for Minecraft builds: rotate, zoom and build layer by layer with full material lists and schematic downloads.">
+  <meta name="theme-color" content="#0f1220">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 3 9v14l13 7 13-7V9z' fill='%232d6a4f'/%3E%3Cpath d='M16 2 3 9l13 7 13-7z' fill='%2352b788'/%3E%3Cpath d='M16 16v14l13-7V9z' fill='%231b4332'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header id="header" class="header"></header>
+  <main id="main"></main>
+  <footer id="footer" class="footer"></footer>
+  <div id="assistant"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <noscript><p style="padding:2rem;text-align:center">Blueprint Builds needs JavaScript for the 3D guides.</p></noscript>
+
+  <script src="vendor/three.min.js"></script>
+  <script src="js/blocks.js"></script>
+  <script src="js/builds.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/schem.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
